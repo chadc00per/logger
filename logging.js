@@ -1,76 +1,73 @@
-
 const { createLogger, format, transports } = require('winston');
-const { combine, timestamp, printf, errors } = format;
+const { combine, timestamp, printf, errors, colorize } = format;
 const path = require('path');
 const fs = require('fs');
+const { config } = require('../config');
 
-const logFilePath = path.join(__dirname, '../server.log');
-const successLogFilePath = path.join(__dirname, '../success.log');
+const logFilePath = config.logFilePath;
+
+const customLevels = {
+    levels: {
+        error: 0,
+        warn: 1,
+        info: 2
+    },
+    colors: {
+        error: 'red',
+        warn: 'yellow',
+        info: 'grey'
+    }
+};
 
 if (!fs.existsSync(logFilePath)) {
     fs.writeFileSync(logFilePath, '');
-    console.log(`Log file created: ${logFilePath}`);
-    log('Log file created');
 }
 
-if (!fs.existsSync(successLogFilePath)) {
-    fs.writeFileSync(successLogFilePath, '');
-    console.log(`Success log file created: ${successLogFilePath}`);
-    log('Success log file created');
-}
-
-const logFormat = printf(({ level, message, timestamp, stack }) => {
-    return `${level} \x1b[34m${timestamp}\x1b[0m ${stack || message}`;
-});
+const logFormat = printf(({ level, message, timestamp, stack, callerInfo }) => 
+    `${stack || message}\n      ${callerInfo.file}:${callerInfo.line} @ ${timestamp} ${level}`
+);
 
 const loggerTransports = [
-    new transports.File({ filename: logFilePath })
+    new transports.File({
+        filename: logFilePath,
+        format: combine(
+            timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS', timezone: 'Etc/GMT+5' }),
+            errors({ stack: true }),
+            logFormat
+        )
+    })
 ];
 
 if (process.env.PRINT_TO_CONSOLE === 'true') {
-    loggerTransports.push(new transports.Console({ format: combine(format.colorize(), logFormat) }));
+    loggerTransports.push(new transports.Console({
+        format: combine(
+            colorize({ all: true }),
+            logFormat
+        )
+    }));
 }
 
 const logger = createLogger({
+    levels: customLevels.levels,
     level: 'info',
     format: combine(
-        timestamp(),
+        timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS', timezone: 'Etc/GMT+5' }),
         errors({ stack: true }),
         logFormat
     ),
     transports: loggerTransports
 });
 
-const successLoggerTransports = [
-    new transports.File({ filename: successLogFilePath })
-];
-
-if (process.env.PRINT_TO_CONSOLE === 'true') {
-    successLoggerTransports.push(new transports.Console({ format: combine(format.colorize(), logFormat) }));
-}
-
-const successLogger = createLogger({
-    level: 'info',
-    format: combine(
-        timestamp(),
-        logFormat
-    ),
-    transports: successLoggerTransports
-});
-
 function getCallerFile() {
     const originalFunc = Error.prepareStackTrace;
-    let callerfile;
-    let callerline;
     try {
         const err = new Error();
-        Error.prepareStackTrace = function (err, stack) { return stack; };
+        Error.prepareStackTrace = (_, stack) => stack;
         const currentfile = err.stack.shift().getFileName();
 
-        while (err.stack.length) {
-            const caller = err.stack.shift();
-            callerfile = caller.getFileName();
-            callerline = caller.getLineNumber();
+        for (const caller of err.stack) {
+            const callerfile = caller.getFileName();
+            const callerline = caller.getLineNumber();
 
             if (currentfile !== callerfile) {
                 const rootPath = path.resolve(__dirname, '../../');
@@ -83,37 +80,26 @@ function getCallerFile() {
     } finally {
         Error.prepareStackTrace = originalFunc;
     }
-    return
-    // 'not called through file';
 }
 
-async function log(message) {
+require('winston').addColors(customLevels.colors);
+
+function logMessage(level, message) {
     if (!message) {
-        console.error('Log message is null or undefined');
+        throw new Error('Log message is null or undefined');
         return;
+    }
+    if (!customLevels.levels.hasOwnProperty(level)) {
+        throw new Error(`Invalid log level: ${level}`);
     }
     const callerInfo = getCallerFile();
-    await logger.info(`\x1b[90m${callerInfo.file}: ${callerInfo.line}\x1b[0m\n${message}`);
+    logger[level]({ message, callerInfo });
 }
 
-async function successLog(message) {
-    if (!message) {
-        console.error('Success log message is null or undefined');
-        return;
-    }
-    await successLogger.info(message);
-}
+const log = (message) => logMessage('info', message);
 
-const logIncomingRequest = async (req, res, next) => {
-    const start = Date.now();
-    await log(`Incoming request: ${req.method} ${req.url}`);
-    res.on('finish', async () => {
-      const duration = Date.now() - start;
-      await log(
-        `${req.method} ${req.url} ${res.statusCode} ${res.statusMessage}; ${duration}ms`
-      );
-    });
-    next();
-};
+['info', 'error', 'warn'].forEach(level => {
+    log[level] = (message) => logMessage(level, message);
+});
 
-module.exports = { log, successLog, logIncomingRequest };
+module.exports = { log };
